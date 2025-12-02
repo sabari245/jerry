@@ -45,7 +45,7 @@ dep_ch() {
         command -v "$dep" >/dev/null || send_notification "Program \"$dep\" not found. Please install it."
     done
 }
-dep_ch "grep" "$sed" "curl" "fzf" || true
+dep_ch "grep" "$sed" "curl" "fzf" "jq" || true
 
 if [ "$use_external_menu" = true ]; then
     dep_ch "rofi" || true
@@ -120,6 +120,7 @@ configuration() {
     [ -z "$manga_format" ] && manga_format="image"
     [ -z "$manga_opener" ] && manga_opener="feh"
     [ -z "$history_file" ] && history_file="$data_dir/jerry_history.txt"
+    [ -z "$provider_cache_file" ] && provider_cache_file="$data_dir/provider_cache.json"
     [ -z "$subs_language" ] && subs_language="english"
     subs_language="$(printf "%s" "$subs_language" | cut -c2-)"
     [ -z "$use_external_menu" ] && use_external_menu=false
@@ -210,6 +211,27 @@ select_quality() {
     esac
     [ -z "$result" ] && printf "Specified quality not found, defaulting to best\n" 1>&2 && result=$(printf "%s" "$links" | head -n1)
     printf "%s" "$result" | cut -d'>' -f2
+}
+
+#### CACHING FUNCTIONS ####
+
+get_cached_selection() {
+    [ ! -f "$provider_cache_file" ] && return 1
+    cached_value=$(jq -r --arg provider "$1" --arg media_id "$2" '.[$provider][$media_id] // empty' "$provider_cache_file")
+    [ -z "$cached_value" ] && return 1
+    printf "%s" "$cached_value"
+}
+
+save_cached_selection() {
+    [ ! -f "$provider_cache_file" ] && echo "{}" >"$provider_cache_file"
+    tmp_cache=$(mktemp)
+    jq --arg provider "$1" --arg media_id "$2" --arg selection "$3" \
+        '.[$provider] += {($media_id): $selection}' "$provider_cache_file" >"$tmp_cache" && mv "$tmp_cache" "$provider_cache_file"
+}
+
+clear_cache() {
+    rm -f "$provider_cache_file"
+    send_notification "Provider cache cleared"
 }
 
 #### GENERAL HELPER FUNCTIONS ####
@@ -862,11 +884,15 @@ get_episode_info() {
             response=$(curl -e "$allanime_refr" -s -G "https://api.$allanime_base/api" --data-urlencode 'variables={"search":{"allowAdult":false,"allowUnknown":false,"query":"'"$query_title"'"},"limit":40,"page":1,"translationType":"sub","countryOrigin":"ALL"}' --data-urlencode 'query=query(        $search: SearchInput        $limit:Int        $page: Int        $translationType: VaildTranslationTypeEnumType        $countryOrigin: VaildCountryOriginEnumType    ) {    shows(        search: $search        limit: $limit        page: $page        translationType: $translationType        countryOrigin: $countryOrigin    ) {        edges {            _id name availableEpisodes __typename       }    }}' | sed 's|Show|\n|g' | sed -nE 's|.*_id":"([^"]*)","name":"([^"]*)".*sub":([1-9][^,]*).*|\1\t\2 (\3 episodes)|p')
             [ -z "$response" ] && exit 1
             # if it is only one line long, then auto select it
-            if [ "$(printf "%s\n" "$response" | wc -l)" -eq 1 ]; then
+            cached_choice=$(get_cached_selection "allanime" "$media_id")
+            if [ -n "$cached_choice" ]; then
+                choice="$cached_choice"
+            elif [ "$(printf "%s\n" "$response" | wc -l)" -eq 1 ]; then
                 send_notification "Jerry" "" "" "Since there is only one result, it was automatically selected"
                 choice=$response
             else
                 choice=$(printf "%s" "$response" | launcher "Choose anime: " 2)
+                [ -n "$choice" ] && save_cached_selection "allanime" "$media_id" "$choice"
             fi
             [ -z "$choice" ] && exit 1
             title=$(printf "%s" "$choice" | cut -f2 | sed -E 's| \([0-9]* episodes\)||')
@@ -895,15 +921,19 @@ get_episode_info() {
                 sed -nE "s@.*\"title\":.\"([^\"]*)\".*@\1@p" | head -1 | tr ' ' '+')
             request=$(curl -s "https://hdrezka.website/search/?do=search&subaction=search&q=${query}" -A "uwu" --compressed)
             response=$(printf "%s" "$request" | sed "s/<img/\n/g" | sed -nE "s@.*src=\"([^\"]*)\".*<a href=\"https://hdrezka\.website/(.*)/(.*)/(.*)\.html\">([^<]*)</a> <div>([0-9]*).*@\3/\4\t\5 [\6]\t\2@p")
+            cached_choice=$(get_cached_selection "hdrezka" "$media_id")
             if [ -z "$response" ]; then
                 send_notification "Error" "Could not query the anime on hdrezka"
                 exit 1
             fi
-            if [ "$(printf "%s\n" "$response" | wc -l)" -eq 1 ]; then
+            if [ -n "$cached_choice" ]; then
+                episode_info="$cached_choice"
+            elif [ "$(printf "%s\n" "$response" | wc -l)" -eq 1 ]; then
                 send_notification "Jerry" "" "" "Since there is only one result, it was automatically selected"
                 episode_info=$response
             else
                 episode_info=$(printf "%s" "$response" | launcher "Choose anime: " 2)
+                [ -n "$episode_info" ] && save_cached_selection "hdrezka" "$media_id" "$episode_info"
             fi
             ;;
         aniworld)
@@ -915,11 +945,15 @@ get_episode_info() {
                 send_notification "Error" "Could not query the anime on aniworld"
                 exit 1
             fi
-            if [ "$(printf "%s\n" "$response" | wc -l)" -eq 1 ]; then
+            cached_choice=$(get_cached_selection "aniworld" "$media_id")
+            if [ -n "$cached_choice" ]; then
+                episode_info="$cached_choice"
+            elif [ "$(printf "%s\n" "$response" | wc -l)" -eq 1 ]; then
                 send_notification "Jerry" "" "" "Since there is only one result, it was automatically selected"
                 episode_info=$response
             else
                 episode_info=$(printf "%s" "$response" | launcher "Choose anime: " 1)
+                [ -n "$episode_info" ] && save_cached_selection "aniworld" "$media_id" "$episode_info"
             fi
             ;;
         crunchyroll)
@@ -1461,6 +1495,10 @@ while [ $# -gt 0 ]; do
             break
             ;;
         -c | --continue) mode_choice="Watch Anime" && shift ;;
+        --clear-cache)
+            clear_cache
+            shift
+            ;;
         --clear-history | --delete-history)
             while true; do
                 printf "This will delete your jerry history. Are you sure? [Y/n] "
