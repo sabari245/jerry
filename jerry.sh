@@ -1411,6 +1411,104 @@ binge() {
     done
 }
 
+download_series() {
+    # 1. Select Anime
+    choice_str="Search"
+    [ -z "$no_anilist" ] && choice_str="Anilist List\n$choice_str"
+    
+    source_choice=$(printf "$choice_str" | launcher "Choose source: ")
+    
+    case "$source_choice" in
+        "Anilist List")
+            get_anime_from_list "CURRENT|REPEATING|PLANNING"
+            ;;
+        "Search")
+            get_input "Search anime to download: "
+            [ -z "$query" ] && exit 1
+            search_anime_anilist "$query"
+            ;;
+        *) exit 1 ;;
+    esac
+    
+    if [ -z "$media_id" ] || [ -z "$title" ]; then
+        send_notification "Jerry" "" "" "Error, no anime selected"
+        exit 1
+    fi
+
+    # 2. Select Provider (Reuse get_episode_info logic partially to get provider ID)
+    if [ -z "$provider" ]; then
+         provider="allanime" # Default for download
+    fi
+    
+    # Ensure provider vars are set (fix for --download bypassing main setup)
+    if [ "$provider" = "allanime" ]; then
+        allanime_refr="https://allanime.to"
+        allanime_base="allanime.day"
+    fi
+    
+    send_notification "Jerry" "" "" "Getting provider info..."
+    
+    # We temporarily set progress to 0 to get the first episode info which contains the show ID
+    old_progress=$progress
+    progress=0
+    get_episode_info
+    progress=$old_progress
+    
+    # Extract ID from episode_info
+    if [ "$provider" = "allanime" ]; then
+        provider_id=$(printf "%s" "$episode_info" | cut -f1)
+    else
+        send_notification "Jerry" "Provider $provider not supported for series download yet."
+        exit 1
+    fi
+    
+    if [ -z "$provider_id" ]; then
+        send_notification "Jerry" "Could not get provider ID."
+        exit 1
+    fi
+    
+    # 3. Call Python Script
+    downloader_script="series_downloader.py"
+    if command -v "$downloader_script" >/dev/null; then
+        :
+    elif [ -f "$(dirname "$0")/$downloader_script" ]; then
+        downloader_script="$(dirname "$0")/$downloader_script"
+    elif [ -f "$PWD/$downloader_script" ]; then
+        downloader_script="$PWD/$downloader_script"
+    else
+        send_notification "Jerry" "Could not find series_downloader.py"
+        exit 1
+    fi
+    
+    if [ "$use_external_menu" = false ]; then
+        printf "Start from episode (default 1): "
+        read -r start_ep
+    else
+        start_ep=$(printf "" | launcher "Start from episode (default 1): ")
+    fi
+    
+    [ -z "$start_ep" ] && start_ep=1
+    
+    cmd="python3 \"$downloader_script\" --title \"$title\" --provider \"$provider\" --provider-id \"$provider_id\" --episodes \"$episodes_total\" --start \"$start_ep\""
+    
+    if [ "$use_external_menu" = true ]; then
+        term=""
+        if command -v alacritty >/dev/null; then term="alacritty -e"
+        elif command -v kitty >/dev/null; then term="kitty -e"
+        elif command -v gnome-terminal >/dev/null; then term="gnome-terminal --"
+        elif command -v xterm >/dev/null; then term="xterm -e"
+        fi
+        
+        if [ -n "$term" ]; then
+            $term sh -c "$cmd; echo 'Press Enter to exit'; read _"
+        else
+            send_notification "Jerry" "No terminal found to run downloader."
+        fi
+    else
+        eval "$cmd"
+    fi
+}
+
 main() {
     if [ -z "$no_anilist" ]; then
         check_credentials
@@ -1418,7 +1516,7 @@ main() {
             exit 1
         fi
         [ -n "$query" ] && mode_choice="Watch New Anime"
-        [ -z "$mode_choice" ] && mode_choice=$(printf "Watch Anime\nRead Manga\nUpdate (Episodes, Status, Score)\nInfo\nWatch New Anime\nRead New Manga" | launcher "Choose an option: ")
+        [ -z "$mode_choice" ] && mode_choice=$(printf "Watch Anime\nRead Manga\nDownload Series\nUpdate (Episodes, Status, Score)\nInfo\nWatch New Anime\nRead New Manga" | launcher "Choose an option: ")
     else
         # TODO: implement manga stuff for no_anilist
         [ -n "$query" ] && mode_choice="Watch Anime"
@@ -1427,6 +1525,7 @@ main() {
     case "$mode_choice" in
         "Watch Anime") binge "ANIME" ;;
         "Read Manga") binge "MANGA" ;;
+        "Download Series") download_series ;;
         "Update (Episodes, Status, Score)")
             update_choice=$(printf "Change Episodes Watched\nChange Chapters Read\nChange Status\nChange Score" | launcher "Choose an option: ")
             case "$update_choice" in
@@ -1519,6 +1618,10 @@ while [ $# -gt 0 ]; do
                 esac
             done
             shift
+            ;;
+        --download)
+            download_series
+            exit 0
             ;;
         -d | --discord) discord_presence=true && shift ;;
         --dub) sub_or_dub="dub" && shift ;;
