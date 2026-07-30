@@ -1,0 +1,3 @@
+- Use object-oriented domain model design, also called the "tell, don't ask" style: keep behavior on the relevant class instead of creating a god object.
+- Run `uv run ruff check .` and use `uv run ruff check . --fix` for safe automatic fixes before finishing changes.
+- Follow YAGNI principles and prefer one-liners when they remain clear.
