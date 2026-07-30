@@ -13,7 +13,7 @@ def main():
     chapter = manga.chapter(1)
     print(f"chapter: {chapter.title}")
     chapter.save(output_dir)
-    
+
 
 if __name__ == "__main__":
     main()
